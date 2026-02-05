@@ -1,6 +1,15 @@
 # Quorum Escrow — 3-of-5 Verification + Auto Verifier Selection (Base Sepolia)
 
-This project is a minimal ERC20 escrow where *independent verifiers* attest whether a job is complete.
+This is a **framework for “pay-for-work” jobs**:
+
+- A **payer** deposits funds into escrow
+- A **worker** submits a deliverable (hash / link)
+- A **quorum of verifiers** (3-of-5) decides whether the deliverable is valid
+- The contract then **settles automatically**:
+  - **approved → pays the worker**
+  - **rejected → refunds the payer**
+
+Think of it as the **settlement layer** for an agent economy / gig marketplace — not the whole marketplace UI.
 
 There are two demo modes:
 
@@ -14,6 +23,9 @@ There are two demo modes:
 Open the human-friendly viewer:
 
 - https://shawm69.github.io/GregHackathon/
+
+Judges/humans can read this README as a web page:
+- https://shawm69.github.io/GregHackathon/readme.html
 
 What it shows:
 - overview + recent activity
