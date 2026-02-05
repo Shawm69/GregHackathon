@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Quorum Escrow Viewer (Base Sepolia)</title>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; max-width: 900px; margin: 32px auto; padding: 0 16px; }
+      code, pre { background: #f6f8fa; padding: 2px 6px; border-radius: 6px; }
+      pre { padding: 12px; overflow-x: auto; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+      label { display: block; font-size: 12px; color: #555; margin-bottom: 6px; }
+      input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      button { padding: 10px 14px; border: 1px solid #111; background: #111; color: #fff; border-radius: 8px; cursor: pointer; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      .card { border: 1px solid #eee; border-radius: 12px; padding: 14px; margin-top: 14px; }
+      .grid { display: grid; grid-template-columns: 220px 1fr; gap: 8px 12px; }
+      .muted { color: #666; }
+      .ok { color: #0a7a2f; font-weight: 600; }
+      .bad { color: #b42318; font-weight: 600; }
+      .warn { color: #9a6700; font-weight: 600; }
+      a { color: #1a73e8; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    </style>
+  </head>
+  <body>
+    <h1>Quorum Escrow Viewer</h1>
+    <p class="muted">Minimal on-chain viewer for <b>Base Sepolia</b>. It can list jobs from events and show a job’s details + expected payouts.</p>
+
+    <div class="card">
+      <div class="row">
+        <div style="flex: 1 1 360px;">
+          <label>RPC URL (Base Sepolia)</label>
+          <input id="rpc" value="https://base-sepolia-rpc.publicnode.com" />
+        </div>
+        <div style="flex: 1 1 360px;">
+          <label>QuorumEscrow contract</label>
+          <input id="escrow" value="0x67349ed235916c42B97243C08d36De5c539b1C07" />
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 12px;">
+        <div style="flex: 1 1 260px;">
+          <label>Lookback blocks (for job list)</label>
+          <input id="lookback" value="200000" />
+        </div>
+        <div style="flex: 1 1 420px;">
+          <label>Verifier address (optional: highlights jobs you can verify)</label>
+          <input id="verifier" placeholder="0x…" />
+        </div>
+        <div>
+          <button id="listBtn">List jobs</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 12px;">
+        <div style="flex: 1 1 720px;">
+          <label>Job ID (bytes32 hex)</label>
+          <input id="jobId" placeholder="0x… (32 bytes)" />
+        </div>
+        <div>
+          <button id="loadBtn">Load job</button>
+        </div>
+      </div>
+
+      <div id="jobs" class="card" style="display:none;"></div>
+    </div>
+
+    <div id="status" class="card" style="display:none;"></div>
+
+    <script src="https://unpkg.com/ethers@5.8.0/dist/ethers.umd.min.js"></script>
+    <script>
+      const ABI = [
+        // views
+        "function jobs(bytes32) view returns (address payer,address worker,address token,uint256 amount,uint16 verifierFeeBps,uint16 protocolFeeBps,address protocolFeeRecipient,address[5] verifiers,uint8 approvals,uint8 rejections,bytes32 workHash,uint8 state)",
+        "function hasAttested(bytes32,address) view returns (bool)",
+        // events
+        "event JobCreated(bytes32 indexed jobId, address indexed payer, address indexed worker, address token, uint256 amount)",
+        "event WorkSubmitted(bytes32 indexed jobId, bytes32 workHash)",
+        "event Attested(bytes32 indexed jobId, address indexed verifier, bool approved)",
+        "event Finalized(bytes32 indexed jobId, bool approved, uint256 workerPaid, uint256 protocolFee, uint256 verifierFeeEach)"
+      ];
+
+      const stateName = (s) => ({0:"None",1:"Funded",2:"Submitted",3:"Finalized",4:"Cancelled"}[Number(s)] ?? String(s));
+
+      function fmtUSDC(amount6) {
+        const s = amount6.toString();
+        const pad = s.padStart(7,'0');
+        const whole = pad.slice(0,-6);
+        const frac = pad.slice(-6).replace(/0+$/,'');
+        return frac ? `${whole}.${frac}` : whole;
+      }
+
+      const explorerAddr = (addr) => `https://sepolia.basescan.org/address/${addr}`;
+      const explorerTx = (tx) => `https://sepolia.basescan.org/tx/${tx}`;
+
+      function setBusy(btn, busy) {
+        btn.disabled = busy;
+        btn.textContent = busy ? 'Loading…' : btn.dataset.label;
+      }
+
+      async function getContract() {
+        const rpc = document.getElementById('rpc').value.trim();
+        const escrow = document.getElementById('escrow').value.trim();
+        if (!rpc.startsWith('http')) throw new Error('RPC URL must start with https://');
+        if (!ethers.utils.isAddress(escrow)) throw new Error('Invalid escrow address');
+        const provider = new ethers.providers.JsonRpcProvider(rpc);
+        const c = new ethers.Contract(escrow, ABI, provider);
+        return { provider, c, escrow };
+      }
+
+      async function loadJob(jobId) {
+        const statusEl = document.getElementById('status');
+        const btn = document.getElementById('loadBtn');
+
+        statusEl.style.display = 'block';
+        statusEl.innerHTML = '<span class="muted">Loading job…</span>';
+        setBusy(btn, true);
+
+        try {
+          if (!ethers.utils.isHexString(jobId, 32)) throw new Error('jobId must be 32-byte hex (bytes32)');
+
+          const { c } = await getContract();
+          const j = await c.jobs(jobId);
+
+          const amount = j.amount;
+          const verifierFeeEach = amount.mul(j.verifierFeeBps).div(10000);
+          const verifierFeeTotal = verifierFeeEach.mul(5);
+          const protocolFee = amount.mul(j.protocolFeeBps).div(10000);
+          const remainder = amount.sub(verifierFeeTotal).sub(protocolFee);
+
+          const approvedReached = Number(j.approvals) >= 3;
+          const rejectedReached = Number(j.rejections) >= 3;
+
+          const verifiers = j.verifiers;
+          const att = [];
+          for (const v of verifiers) {
+            att.push([v, await c.hasAttested(jobId, v)]);
+          }
+
+          statusEl.innerHTML = `
+            <h2 style="margin-top:0;">Job details</h2>
+            <div class="grid">
+              <div class="muted">Job ID</div><div><code>${jobId}</code></div>
+              <div class="muted">State</div><div><b>${stateName(j.state)}</b></div>
+              <div class="muted">Payer</div><div><a href="${explorerAddr(j.payer)}" target="_blank">${j.payer}</a></div>
+              <div class="muted">Worker</div><div><a href="${explorerAddr(j.worker)}" target="_blank">${j.worker}</a></div>
+              <div class="muted">Token</div><div><a href="${explorerAddr(j.token)}" target="_blank">${j.token}</a></div>
+              <div class="muted">Amount</div><div>${fmtUSDC(amount)} (6 decimals)</div>
+              <div class="muted">Approvals / Rejections</div><div><span class="ok">${j.approvals}</span> / <span class="bad">${j.rejections}</span></div>
+              <div class="muted">Work hash</div><div><code>${j.workHash}</code></div>
+              <div class="muted">Verifier fee</div><div>${j.verifierFeeBps} bps each → ${fmtUSDC(verifierFeeEach)} each (${fmtUSDC(verifierFeeTotal)} total)</div>
+              <div class="muted">Protocol fee</div><div>${j.protocolFeeBps} bps → ${fmtUSDC(protocolFee)} to <a href="${explorerAddr(j.protocolFeeRecipient)}" target="_blank">${j.protocolFeeRecipient}</a></div>
+              <div class="muted">Remainder</div><div>${fmtUSDC(remainder)} to ${approvedReached ? '<b class="ok">worker</b>' : rejectedReached ? '<b class="bad">payer</b>' : '<b class="warn">(not yet finalized)</b>'}</div>
+            </div>
+
+            <h3>Verifiers</h3>
+            <pre>${att.map(([v,a],i)=>`${i+1}. ${v}  attested=${a}`).join('\n')}</pre>
+          `;
+        } catch (e) {
+          statusEl.innerHTML = `<span class="bad">Error:</span> <code>${(e && e.message) ? e.message : String(e)}</code>`;
+        } finally {
+          setBusy(btn, false);
+        }
+      }
+
+      async function listJobs() {
+        const jobsEl = document.getElementById('jobs');
+        const btn = document.getElementById('listBtn');
+        jobsEl.style.display = 'block';
+        jobsEl.innerHTML = '<span class="muted">Loading job list…</span>';
+        setBusy(btn, true);
+
+        try {
+          const lookback = Number(document.getElementById('lookback').value.trim() || '0');
+          const verifier = document.getElementById('verifier').value.trim();
+          if (verifier && !ethers.utils.isAddress(verifier)) throw new Error('Invalid verifier address');
+
+          const { provider, c, escrow } = await getContract();
+          const latest = await provider.getBlockNumber();
+          const fromBlock = Math.max(0, latest - (Number.isFinite(lookback) ? lookback : 0));
+
+          const createdFilter = c.filters.JobCreated();
+          const logs = await c.queryFilter(createdFilter, fromBlock, latest);
+
+          // newest first
+          logs.reverse();
+
+          // Dedup by jobId
+          const seen = new Set();
+          const jobIds = [];
+          for (const ev of logs) {
+            const id = ev.args.jobId;
+            const hex = id;
+            if (seen.has(hex)) continue;
+            seen.add(hex);
+            jobIds.push({ jobId: hex, tx: ev.transactionHash, payer: ev.args.payer, worker: ev.args.worker, token: ev.args.token, amount: ev.args.amount });
+          }
+
+          if (jobIds.length === 0) {
+            jobsEl.innerHTML = `<b>No jobs found</b> in the last ${latest - fromBlock} blocks.`;
+            return;
+          }
+
+          // Pull details for top N so we can label "available verifications" (Submitted + verifier is part of job + hasn't attested).
+          const N = Math.min(25, jobIds.length);
+          const rows = [];
+          for (let i = 0; i < N; i++) {
+            const x = jobIds[i];
+            const j = await c.jobs(x.jobId);
+            const isSubmitted = Number(j.state) === 2;
+            const isVerifier = verifier ? j.verifiers.map(v => v.toLowerCase()).includes(verifier.toLowerCase()) : false;
+            const already = (verifier && isVerifier) ? await c.hasAttested(x.jobId, verifier) : false;
+            const canVerify = verifier ? (isSubmitted && isVerifier && !already) : false;
+
+            rows.push({
+              jobId: x.jobId,
+              state: stateName(j.state),
+              amount: fmtUSDC(j.amount),
+              approvals: Number(j.approvals),
+              rejections: Number(j.rejections),
+              canVerify
+            });
+          }
+
+          jobsEl.innerHTML = `
+            <h2 style="margin-top:0;">Jobs (last ${latest - fromBlock} blocks)</h2>
+            <div class="muted">Showing ${rows.length} newest jobs. Click a jobId to load details.</div>
+            <pre>${rows.map((r, idx) => {
+              const flag = verifier ? (r.canVerify ? '  <-- AVAILABLE TO VERIFY' : '') : '';
+              return `${idx+1}. ${r.jobId} | state=${r.state} | amount=${r.amount} | a/r=${r.approvals}/${r.rejections}${flag}`;
+            }).join('\n')}</pre>
+            <div class="muted">Escrow: <a href="${explorerAddr(escrow)}" target="_blank">${escrow}</a></div>
+          `;
+
+          // Make jobIds clickable by copying into the input
+          // (simple: user clicks a line and we parse the first 66 chars)
+          jobsEl.querySelector('pre').addEventListener('click', (e) => {
+            const sel = window.getSelection().toString();
+            const m = sel.match(/0x[0-9a-fA-F]{64}/);
+            if (m) {
+              document.getElementById('jobId').value = m[0];
+            }
+          });
+        } catch (e) {
+          jobsEl.innerHTML = `<span class="bad">Error:</span> <code>${(e && e.message) ? e.message : String(e)}</code>`;
+        } finally {
+          setBusy(btn, false);
+        }
+      }
+
+      document.getElementById('loadBtn').dataset.label = 'Load job';
+      document.getElementById('listBtn').dataset.label = 'List jobs';
+      document.getElementById('loadBtn').addEventListener('click', () => loadJob(document.getElementById('jobId').value.trim()));
+      document.getElementById('listBtn').addEventListener('click', listJobs);
+    </script>
+  </body>
+</html>
