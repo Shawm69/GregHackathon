@@ -40,29 +40,31 @@
       </div>
 
       <div class="row" style="margin-top: 12px;">
-        <div style="flex: 1 1 260px;">
-          <label>Lookback blocks (for job list)</label>
+        <div style="flex: 1 1 220px;">
+          <label>Lookback blocks</label>
           <input id="lookback" value="200000" />
         </div>
         <div style="flex: 1 1 420px;">
-          <label>Verifier address (optional: highlights jobs you can verify)</label>
+          <label>Verifier address (optional)</label>
           <input id="verifier" placeholder="0x…" />
         </div>
         <div>
-          <button id="listBtn">List jobs</button>
+          <button id="refreshBtn">Refresh</button>
         </div>
       </div>
 
-      <div class="row" style="margin-top: 12px;">
+      <div class="row" style="margin-top: 10px;">
         <div style="flex: 1 1 720px;">
-          <label>Job ID (bytes32 hex)</label>
-          <input id="jobId" placeholder="0x… (32 bytes)" />
+          <label>Job ID</label>
+          <input id="jobId" placeholder="0x… (bytes32)" />
         </div>
         <div>
-          <button id="loadBtn">Load job</button>
+          <button id="loadBtn">Load</button>
         </div>
       </div>
 
+      <div id="summary" class="card" style="display:none;"></div>
+      <div id="activity" class="card" style="display:none;"></div>
       <div id="jobs" class="card" style="display:none;"></div>
     </div>
 
@@ -97,6 +99,19 @@
       function setBusy(btn, busy) {
         btn.disabled = busy;
         btn.textContent = busy ? 'Loading…' : btn.dataset.label;
+      }
+
+      function shortAddr(a) {
+        if (!a) return '';
+        return `${a.slice(0,6)}…${a.slice(-4)}`;
+      }
+
+      function byStateRank(s) {
+        // Submitted first, then Funded, then other
+        const x = String(s);
+        if (x === 'Submitted') return 0;
+        if (x === 'Funded') return 1;
+        return 2;
       }
 
       async function getContract() {
@@ -164,11 +179,18 @@
         }
       }
 
-      async function listJobs() {
+      async function loadDashboard() {
+        const summaryEl = document.getElementById('summary');
+        const activityEl = document.getElementById('activity');
         const jobsEl = document.getElementById('jobs');
-        const btn = document.getElementById('listBtn');
+        const btn = document.getElementById('refreshBtn');
+
+        summaryEl.style.display = 'block';
+        activityEl.style.display = 'block';
         jobsEl.style.display = 'block';
-        jobsEl.innerHTML = '<span class="muted">Loading job list…</span>';
+        summaryEl.innerHTML = '<span class="muted">Loading…</span>';
+        activityEl.innerHTML = '<span class="muted">Loading…</span>';
+        jobsEl.innerHTML = '<span class="muted">Loading…</span>';
         setBusy(btn, true);
 
         try {
@@ -180,79 +202,122 @@
           const latest = await provider.getBlockNumber();
           const fromBlock = Math.max(0, latest - (Number.isFinite(lookback) ? lookback : 0));
 
-          const createdFilter = c.filters.JobCreated();
-          const logs = await c.queryFilter(createdFilter, fromBlock, latest);
+          // Recent activity (events)
+          const created = await c.queryFilter(c.filters.JobCreated(), fromBlock, latest);
+          const submitted = await c.queryFilter(c.filters.WorkSubmitted(), fromBlock, latest);
+          const attested = await c.queryFilter(c.filters.Attested(), fromBlock, latest);
+          const finalized = await c.queryFilter(c.filters.Finalized(), fromBlock, latest);
 
-          // newest first
-          logs.reverse();
+          const activity = [];
+          for (const ev of created) activity.push({ type: 'JobCreated', jobId: ev.args.jobId, tx: ev.transactionHash, block: ev.blockNumber, note: `payer=${shortAddr(ev.args.payer)} worker=${shortAddr(ev.args.worker)}` });
+          for (const ev of submitted) activity.push({ type: 'WorkSubmitted', jobId: ev.args.jobId, tx: ev.transactionHash, block: ev.blockNumber, note: `workHash=${String(ev.args.workHash).slice(0,10)}…` });
+          for (const ev of attested) activity.push({ type: 'Attested', jobId: ev.args.jobId, tx: ev.transactionHash, block: ev.blockNumber, note: `verifier=${shortAddr(ev.args.verifier)} approved=${ev.args.approved}` });
+          for (const ev of finalized) activity.push({ type: 'Finalized', jobId: ev.args.jobId, tx: ev.transactionHash, block: ev.blockNumber, note: `approved=${ev.args.approved}` });
+          activity.sort((a,b)=>b.block-a.block);
 
-          // Dedup by jobId
+          const actTop = activity.slice(0, 15);
+          activityEl.innerHTML = `
+            <h2 style="margin-top:0;">Recent activity</h2>
+            <div class="muted">Last ${latest - fromBlock} blocks • ${activity.length} events</div>
+            <pre>${actTop.map((a,i)=>`${i+1}. [${a.type}] jobId=${a.jobId} • ${a.note}\n    tx=${a.tx}`).join('\n')}</pre>
+          `;
+          activityEl.querySelector('pre').addEventListener('click', () => {
+            const sel = window.getSelection().toString();
+            const m = sel.match(/0x[0-9a-fA-F]{64}/);
+            if (m) document.getElementById('jobId').value = m[0];
+          });
+
+          // Jobs list from JobCreated, then fetch state + show "active"
+          created.reverse(); // newest first
           const seen = new Set();
           const jobIds = [];
-          for (const ev of logs) {
-            const id = ev.args.jobId;
-            const hex = id;
+          for (const ev of created) {
+            const hex = ev.args.jobId;
             if (seen.has(hex)) continue;
             seen.add(hex);
-            jobIds.push({ jobId: hex, tx: ev.transactionHash, payer: ev.args.payer, worker: ev.args.worker, token: ev.args.token, amount: ev.args.amount });
+            jobIds.push(hex);
           }
 
-          if (jobIds.length === 0) {
-            jobsEl.innerHTML = `<b>No jobs found</b> in the last ${latest - fromBlock} blocks.`;
-            return;
-          }
-
-          // Pull details for top N so we can label "available verifications" (Submitted + verifier is part of job + hasn't attested).
-          const N = Math.min(25, jobIds.length);
+          const N = Math.min(40, jobIds.length);
           const rows = [];
+          let activeCount = 0;
+          let submittedCount = 0;
+          let canVerifyCount = 0;
+
           for (let i = 0; i < N; i++) {
-            const x = jobIds[i];
-            const j = await c.jobs(x.jobId);
-            const isSubmitted = Number(j.state) === 2;
+            const jobId = jobIds[i];
+            const j = await c.jobs(jobId);
+            const st = stateName(j.state);
+            const isActive = (Number(j.state) === 1 || Number(j.state) === 2); // Funded or Submitted
+            if (isActive) activeCount++;
+            if (Number(j.state) === 2) submittedCount++;
+
             const isVerifier = verifier ? j.verifiers.map(v => v.toLowerCase()).includes(verifier.toLowerCase()) : false;
-            const already = (verifier && isVerifier) ? await c.hasAttested(x.jobId, verifier) : false;
-            const canVerify = verifier ? (isSubmitted && isVerifier && !already) : false;
+            const already = (verifier && isVerifier) ? await c.hasAttested(jobId, verifier) : false;
+            const canVerify = verifier ? (Number(j.state) === 2 && isVerifier && !already) : false;
+            if (canVerify) canVerifyCount++;
 
             rows.push({
-              jobId: x.jobId,
-              state: stateName(j.state),
+              jobId,
+              state: st,
               amount: fmtUSDC(j.amount),
               approvals: Number(j.approvals),
               rejections: Number(j.rejections),
+              isActive,
               canVerify
             });
           }
 
-          jobsEl.innerHTML = `
-            <h2 style="margin-top:0;">Jobs (last ${latest - fromBlock} blocks)</h2>
-            <div class="muted">Showing ${rows.length} newest jobs. Click a jobId to load details.</div>
-            <pre>${rows.map((r, idx) => {
-              const flag = verifier ? (r.canVerify ? '  <-- AVAILABLE TO VERIFY' : '') : '';
-              return `${idx+1}. ${r.jobId} | state=${r.state} | amount=${r.amount} | a/r=${r.approvals}/${r.rejections}${flag}`;
-            }).join('\n')}</pre>
-            <div class="muted">Escrow: <a href="${explorerAddr(escrow)}" target="_blank">${escrow}</a></div>
+          // sort: active first, submitted first
+          rows.sort((a,b)=>{
+            if (a.isActive !== b.isActive) return a.isActive ? -1 : 1;
+            const ar = byStateRank(a.state);
+            const br = byStateRank(b.state);
+            if (ar !== br) return ar - br;
+            return 0;
+          });
+
+          summaryEl.innerHTML = `
+            <h2 style="margin-top:0;">Overview</h2>
+            <div class="grid">
+              <div class="muted">Escrow</div><div><a href="${explorerAddr(escrow)}" target="_blank">${escrow}</a></div>
+              <div class="muted">Blocks scanned</div><div>${latest - fromBlock}</div>
+              <div class="muted">Jobs found</div><div>${jobIds.length}</div>
+              <div class="muted">Active jobs</div><div><b>${activeCount}</b> (Funded+Submitted)</div>
+              <div class="muted">Submitted (needs verdict)</div><div><b>${submittedCount}</b></div>
+              <div class="muted">Available for this verifier</div><div><b>${verifier ? canVerifyCount : 0}</b> ${verifier ? '' : '<span class="muted">(enter verifier address)</span>'}</div>
+            </div>
           `;
 
-          // Make jobIds clickable by copying into the input
-          // (simple: user clicks a line and we parse the first 66 chars)
-          jobsEl.querySelector('pre').addEventListener('click', (e) => {
+          const activeRows = rows.filter(r=>r.isActive);
+          jobsEl.innerHTML = `
+            <h2 style="margin-top:0;">Active jobs</h2>
+            <div class="muted">Showing ${Math.min(25, activeRows.length)} active jobs (newest discovered first). Click a jobId to load details.</div>
+            <pre>${activeRows.slice(0,25).map((r, idx) => {
+              const flag = r.canVerify ? '  <-- YOU CAN VERIFY' : '';
+              return `${idx+1}. ${r.jobId} | state=${r.state} | amount=${r.amount} | a/r=${r.approvals}/${r.rejections}${flag}`;
+            }).join('\n')}</pre>
+          `;
+          jobsEl.querySelector('pre').addEventListener('click', () => {
             const sel = window.getSelection().toString();
             const m = sel.match(/0x[0-9a-fA-F]{64}/);
-            if (m) {
-              document.getElementById('jobId').value = m[0];
-            }
+            if (m) document.getElementById('jobId').value = m[0];
           });
         } catch (e) {
-          jobsEl.innerHTML = `<span class="bad">Error:</span> <code>${(e && e.message) ? e.message : String(e)}</code>`;
+          summaryEl.innerHTML = `<span class="bad">Error:</span> <code>${(e && e.message) ? e.message : String(e)}</code>`;
+          activityEl.innerHTML = '';
+          jobsEl.innerHTML = '';
         } finally {
           setBusy(btn, false);
         }
       }
 
-      document.getElementById('loadBtn').dataset.label = 'Load job';
-      document.getElementById('listBtn').dataset.label = 'List jobs';
+      document.getElementById('loadBtn').dataset.label = 'Load';
+      document.getElementById('refreshBtn').dataset.label = 'Refresh';
       document.getElementById('loadBtn').addEventListener('click', () => loadJob(document.getElementById('jobId').value.trim()));
-      document.getElementById('listBtn').addEventListener('click', listJobs);
+      document.getElementById('refreshBtn').addEventListener('click', loadDashboard);
+      // Auto-load dashboard on open
+      loadDashboard();
     </script>
   </body>
 </html>
