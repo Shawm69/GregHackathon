@@ -34,8 +34,8 @@
           <input id="rpc" value="https://base-sepolia-rpc.publicnode.com" />
         </div>
         <div style="flex: 1 1 360px;">
-          <label>QuorumEscrow contract</label>
-          <input id="escrow" value="0x67349ed235916c42B97243C08d36De5c539b1C07" />
+          <label>QuorumEscrow contract (V2)</label>
+          <input id="escrow" value="0x73bE19712a2Fae539E87B394F212181b11E81e3C" />
         </div>
       </div>
 
@@ -74,8 +74,8 @@
     <script src="https://unpkg.com/ethers@5.8.0/dist/ethers.umd.min.js"></script>
     <script>
       const ABI = [
-        // views
-        "function jobs(bytes32) view returns (address payer,address worker,address token,uint256 amount,uint16 verifierFeeBps,uint16 protocolFeeBps,address protocolFeeRecipient,address[5] verifiers,uint8 approvals,uint8 rejections,bytes32 workHash,uint8 state)",
+        // explicit view getter (V2)
+        "function getJob(bytes32) view returns (address payer,address worker,address token,uint256 amount,uint16 verifierFeeBps,uint16 protocolFeeBps,address protocolFeeRecipient,address[5] verifiers,uint8 approvals,uint8 rejections,bytes32 workHash,uint8 state)",
         "function hasAttested(bytes32,address) view returns (bool)",
         // events
         "event JobCreated(bytes32 indexed jobId, address indexed payer, address indexed worker, address token, uint256 amount)",
@@ -147,7 +147,7 @@
           if (!ethers.utils.isHexString(jobId, 32)) throw new Error('jobId must be 32-byte hex (bytes32)');
 
           const { c } = await getContract();
-          const j = await c.jobs(jobId);
+          const j = await c.getJob(jobId);
 
           const amount = j.amount;
           const verifierFeeEach = amount.mul(j.verifierFeeBps).div(10000);
@@ -257,7 +257,7 @@
 
           for (let i = 0; i < N; i++) {
             const jobId = jobIds[i];
-            const j = await c.jobs(jobId);
+            const j = await c.getJob(jobId);
             const st = stateName(j.state);
             const isActive = (Number(j.state) === 1 || Number(j.state) === 2); // Funded or Submitted
             if (isActive) activeCount++;
