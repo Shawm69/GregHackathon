@@ -34,8 +34,8 @@
           <input id="rpc" value="https://base-sepolia-rpc.publicnode.com" />
         </div>
         <div style="flex: 1 1 360px;">
-          <label>QuorumEscrow contract (V2)</label>
-          <input id="escrow" value="0x73bE19712a2Fae539E87B394F212181b11E81e3C" />
+          <label>Escrow contract (Auto)</label>
+          <input id="escrow" value="0xB302D22e6184e7BE03eB4c7d8C6Dfb243c727a4D" />
         </div>
       </div>
 
@@ -74,13 +74,17 @@
     <script src="https://unpkg.com/ethers@5.8.0/dist/ethers.umd.min.js"></script>
     <script>
       const ABI = [
-        // explicit view getter (V2)
-        "function getJob(bytes32) view returns (address payer,address worker,address token,uint256 amount,uint16 verifierFeeBps,uint16 protocolFeeBps,address protocolFeeRecipient,address[5] verifiers,uint8 approvals,uint8 rejections,bytes32 workHash,uint8 state)",
+        // explicit getters (Auto)
+        "function getJobMeta(bytes32) view returns (address payer,address worker,address token,uint256 amount,uint8 state)",
+        "function getJobFees(bytes32) view returns (uint16 verifierFeeBps,uint16 protocolFeeBps,address protocolFeeRecipient)",
+        "function getJobStatus(bytes32) view returns (uint8 approvals,uint8 rejections,bytes32 workHash,uint64 submittedAt,uint32 rotationCount)",
+        "function getJobVerifiers(bytes32) view returns (address[5] verifiers)",
         "function hasAttested(bytes32,address) view returns (bool)",
         // events
         "event JobCreated(bytes32 indexed jobId, address indexed payer, address indexed worker, address token, uint256 amount)",
         "event WorkSubmitted(bytes32 indexed jobId, bytes32 workHash)",
         "event Attested(bytes32 indexed jobId, address indexed verifier, bool approved)",
+        "event VerifiersRotated(bytes32 indexed jobId, uint32 rotationCount)",
         "event Finalized(bytes32 indexed jobId, bool approved, uint256 workerPaid, uint256 protocolFee, uint256 verifierFeeEach)"
       ];
 
@@ -147,36 +151,59 @@
           if (!ethers.utils.isHexString(jobId, 32)) throw new Error('jobId must be 32-byte hex (bytes32)');
 
           const { c } = await getContract();
-          const j = await c.getJob(jobId);
+          const [meta, fees, status, verifiers] = await Promise.all([
+            c.getJobMeta(jobId),
+            c.getJobFees(jobId),
+            c.getJobStatus(jobId),
+            c.getJobVerifiers(jobId)
+          ]);
 
-          const amount = j.amount;
-          const verifierFeeEach = amount.mul(j.verifierFeeBps).div(10000);
+          const payerAddr = meta.payer;
+          const workerAddr = meta.worker;
+          const tokenAddr = meta.token;
+          const amount = meta.amount;
+          const st = Number(meta.state);
+
+          const verifierFeeBps = fees.verifierFeeBps;
+          const protocolFeeBps = fees.protocolFeeBps;
+          const protocolFeeRecipient = fees.protocolFeeRecipient;
+
+          const approvals = Number(status.approvals);
+          const rejections = Number(status.rejections);
+          const workHash = status.workHash;
+          const submittedAt = Number(status.submittedAt);
+          const rotationCount = Number(status.rotationCount);
+
+          const verifierFeeEach = amount.mul(verifierFeeBps).div(10000);
           const verifierFeeTotal = verifierFeeEach.mul(5);
-          const protocolFee = amount.mul(j.protocolFeeBps).div(10000);
+          const protocolFee = amount.mul(protocolFeeBps).div(10000);
           const remainder = amount.sub(verifierFeeTotal).sub(protocolFee);
 
-          const approvedReached = Number(j.approvals) >= 3;
-          const rejectedReached = Number(j.rejections) >= 3;
+          const approvedReached = approvals >= 3;
+          const rejectedReached = rejections >= 3;
 
-          const verifiers = j.verifiers;
           const att = [];
           for (const v of verifiers) {
             att.push([v, await c.hasAttested(jobId, v)]);
           }
 
+          const submittedText = submittedAt ? new Date(submittedAt * 1000).toISOString() : '-';
+
           statusEl.innerHTML = `
             <h2 style="margin-top:0;">Job details</h2>
             <div class="grid">
               <div class="muted">Job ID</div><div><code>${jobId}</code></div>
-              <div class="muted">State</div><div><b>${stateName(j.state)}</b></div>
-              <div class="muted">Payer</div><div><a href="${explorerAddr(j.payer)}" target="_blank">${j.payer}</a></div>
-              <div class="muted">Worker</div><div><a href="${explorerAddr(j.worker)}" target="_blank">${j.worker}</a></div>
-              <div class="muted">Token</div><div><a href="${explorerAddr(j.token)}" target="_blank">${j.token}</a></div>
+              <div class="muted">State</div><div><b>${stateName(st)}</b></div>
+              <div class="muted">Payer</div><div><a href="${explorerAddr(payerAddr)}" target="_blank">${payerAddr}</a></div>
+              <div class="muted">Worker</div><div><a href="${explorerAddr(workerAddr)}" target="_blank">${workerAddr}</a></div>
+              <div class="muted">Token</div><div><a href="${explorerAddr(tokenAddr)}" target="_blank">${tokenAddr}</a></div>
               <div class="muted">Amount</div><div>${fmtUSDC(amount)} (6 decimals)</div>
-              <div class="muted">Approvals / Rejections</div><div><span class="ok">${j.approvals}</span> / <span class="bad">${j.rejections}</span></div>
-              <div class="muted">Work hash</div><div><code>${j.workHash}</code></div>
-              <div class="muted">Verifier fee</div><div>${j.verifierFeeBps} bps each → ${fmtUSDC(verifierFeeEach)} each (${fmtUSDC(verifierFeeTotal)} total)</div>
-              <div class="muted">Protocol fee</div><div>${j.protocolFeeBps} bps → ${fmtUSDC(protocolFee)} to <a href="${explorerAddr(j.protocolFeeRecipient)}" target="_blank">${j.protocolFeeRecipient}</a></div>
+              <div class="muted">Approvals / Rejections</div><div><span class="ok">${approvals}</span> / <span class="bad">${rejections}</span></div>
+              <div class="muted">Work hash</div><div><code>${workHash}</code></div>
+              <div class="muted">Submitted at</div><div>${submittedText}</div>
+              <div class="muted">Rotation count</div><div>${rotationCount}</div>
+              <div class="muted">Verifier fee</div><div>${verifierFeeBps} bps each → ${fmtUSDC(verifierFeeEach)} each (${fmtUSDC(verifierFeeTotal)} total)</div>
+              <div class="muted">Protocol fee</div><div>${protocolFeeBps} bps → ${fmtUSDC(protocolFee)} to <a href="${explorerAddr(protocolFeeRecipient)}" target="_blank">${protocolFeeRecipient}</a></div>
               <div class="muted">Remainder</div><div>${fmtUSDC(remainder)} to ${approvedReached ? '<b class="ok">worker</b>' : rejectedReached ? '<b class="bad">payer</b>' : '<b class="warn">(not yet finalized)</b>'}</div>
             </div>
 
@@ -257,23 +284,28 @@
 
           for (let i = 0; i < N; i++) {
             const jobId = jobIds[i];
-            const j = await c.getJob(jobId);
-            const st = stateName(j.state);
-            const isActive = (Number(j.state) === 1 || Number(j.state) === 2); // Funded or Submitted
-            if (isActive) activeCount++;
-            if (Number(j.state) === 2) submittedCount++;
+            const [meta, status, verifiersArr] = await Promise.all([
+              c.getJobMeta(jobId),
+              c.getJobStatus(jobId),
+              c.getJobVerifiers(jobId)
+            ]);
 
-            const isVerifier = verifier ? j.verifiers.map(v => v.toLowerCase()).includes(verifier.toLowerCase()) : false;
+            const st = stateName(Number(meta.state));
+            const isActive = (Number(meta.state) === 1 || Number(meta.state) === 2); // Funded or Submitted
+            if (isActive) activeCount++;
+            if (Number(meta.state) === 2) submittedCount++;
+
+            const isVerifier = verifier ? verifiersArr.map(v => v.toLowerCase()).includes(verifier.toLowerCase()) : false;
             const already = (verifier && isVerifier) ? await c.hasAttested(jobId, verifier) : false;
-            const canVerify = verifier ? (Number(j.state) === 2 && isVerifier && !already) : false;
+            const canVerify = verifier ? (Number(meta.state) === 2 && isVerifier && !already) : false;
             if (canVerify) canVerifyCount++;
 
             rows.push({
               jobId,
               state: st,
-              amount: fmtUSDC(j.amount),
-              approvals: Number(j.approvals),
-              rejections: Number(j.rejections),
+              amount: fmtUSDC(meta.amount),
+              approvals: Number(status.approvals),
+              rejections: Number(status.rejections),
               isActive,
               canVerify
             });
