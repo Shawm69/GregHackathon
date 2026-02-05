@@ -1,98 +1,87 @@
-# Quorum Escrow (3-of-5 Verification) — Base Sepolia MVP
+# Quorum Escrow — 3-of-5 Verification + Auto Verifier Selection (Base Sepolia)
 
-Minimal ERC20 escrow where *independent verifiers* attest whether a job is complete.
+This project is a minimal ERC20 escrow where *independent verifiers* attest whether a job is complete.
 
-- **Quorum:** 3-of-5 verifiers
+There are two demo modes:
+
+1) **Auto mode (recommended)**: verifiers are **auto-selected** from an on-chain registry (deterministic pseudo-random). Includes timeout + rotation.
+2) **Manual mode (legacy MVP)**: payer supplies the 5 verifier addresses directly.
+
+---
+
+## Live Viewer (GitHub Pages)
+
+Open the human-friendly viewer:
+
+- https://shawm69.github.io/GregHackathon/
+
+What it shows:
+- overview + recent activity
+- active jobs (Funded/Submitted)
+- “available verifications for you” after **Connect wallet**
+- **Verifier Registry** list (registered verifiers)
+
+---
+
+## Auto Mode (Registry + deterministic selection)
+
+### Deployed (Base Sepolia)
+
+- **VerifierRegistry:** `0xF67c364E2D32E47caf0128006a0a9326b963E465`
+- **QuorumEscrowAuto:** `0xB302D22e6184e7BE03eB4c7d8C6Dfb243c727a4D`
+- **MockUSDC (demo token, 6 decimals):** `0x34D85d11739eA4Eba4B96C50B844786890350371`
+- **Verification timeout:** 600s (10 minutes) → verifiers can be rotated if quorum isn’t reached.
+
+Explorer: https://sepolia.basescan.org/
+
+### How it works
+
+- Verifiers opt-in via `VerifierRegistry.register()`.
+- When a job is created, the escrow selects **5 unique verifiers** from the registry using a deterministic seed.
+- If the job is **Submitted** and no 3-of-5 quorum is reached within the timeout, anyone can call `rotateVerifiers(jobId)` to assign a new set.
+
+**Important:** selection is **deterministic pseudo-random**, not VRF. It is intended as an MVP mechanism + UX primitive.
+
+### Seeded auto jobs (for the viewer)
+
+- **Funded:** `0x20e6eb48ab013e2a7a7fd7f18f1ea85dc2b93ca5724867913dbb6af9c48858b7`
+- **Submitted:** `0x4fefb4808a69bdd4086e503e6369b3d7a018aee260103a7abfcc0cf5c385d7c9`
+
+---
+
+## Manual Mode (legacy MVP)
+
+### Deployed (Base Sepolia)
+
+- **QuorumEscrow (manual):** `0x67349ed235916c42B97243C08d36De5c539b1C07`
+
+---
+
+## Economics
+
+- **Quorum:** 3-of-5
 - **Fees:**
   - **Verifier fee:** 1% **per verifier** (5% total)
   - **Protocol/coordinator fee:** 0.5%
   - **Net to worker (on approve):** 94.5%
-- **Track:** SmartContract / Most Novel Smart Contract (USDC Hackathon)
 
-## Deployed (Base Sepolia)
-
-- **QuorumEscrow:** `0x67349ed235916c42B97243C08d36De5c539b1C07`
-- **MockUSDC (demo token, 6 decimals):** `0x34D85d11739eA4Eba4B96C50B844786890350371`
-
-Explorer: https://sepolia.basescan.org/
-
-## Demo transactions (end-to-end proof)
-
-- `createJob`: `0x5fc65923eab8a21bbf10a0c9a37c21a518f7b9f90e27114ed61dba7e9bdd0c2f`
-- `submitWork`: `0x02380583ed998ca6722f39b5a56bec3a33e71f2e92c5fb362671555af6d938bd`
-- `attest v1`: `0x34960455b5fcae818a0dbf2f1513ebf54179995d77601ab4d5cd99aee48b5466`
-- `attest v2`: `0x8623293be45b8755dbc0689f343316235d0189cb34ee55a14160f33033427405`
-- `attest v3`: `0xda25f94d7629a6276ef03d4ead6c8ce9d3dc03598c3e38f918c272cbdd1e74f0`
-- `finalize`: `0x0fe71660bd9f957eb7b856299fe620fa7b2a3f263aa7a3b13af09baac692c7f0`
-
-Outcome for a **100 USDC** escrow:
-- Worker paid: **94.5 USDC** (`94500000` in 6-decimals)
-- Each verifier paid: **1.0 USDC**
-- Protocol fee: **0.5 USDC**
+---
 
 ## Local dev
 
-From this folder:
-
 ```bash
+cd projects/quorum-escrow
 npm i
 npm test
-npx hardhat run --config hardhat.config.cjs scripts/demo-local.cjs
 ```
 
 > Note: Hardhat warns about Node v25 in this environment. Tests still run.
 
-## Base Sepolia deploy / demo scripts
+---
 
-Set env vars:
-
-```bash
-export BASE_SEPOLIA_RPC_URL=https://base-sepolia-rpc.publicnode.com
-export DEPLOYER_PRIVATE_KEY=0xYOUR_KEY
-```
-
-Deploy:
-
-```bash
-npx hardhat run --config hardhat.config.cjs scripts/deploy-base-sepolia.cjs --network baseSepolia
-npx hardhat run --config hardhat.config.cjs scripts/deploy-mockusdc-base-sepolia.cjs --network baseSepolia
-```
-
-Run demo (requires deployed addresses):
-
-```bash
-export QUORUM_ESCROW=0x...
-export USDC=0x...
-npx hardhat run --config hardhat.config.cjs scripts/demo-base-sepolia.cjs --network baseSepolia
-```
-
-## 1-page viewer (humans)
-
-Open:
-
-- `viewer/index.html`
-
-It reads a `jobId` (bytes32) and shows:
-- payer/worker/token
-- approvals/rejections
-- verifier list + whether each has attested
-- expected payouts (verifier/protocol/remainder)
-
-You can host this on GitHub Pages, Netlify, Vercel static, etc.
-
-## Contract interface (MVP)
-
-- `createJob(jobId, worker, token, amount, verifiers[5], verifierFeeBps, protocolFeeBps, protocolFeeRecipient)`
-- `submitWork(jobId, workHash)`
-- `attest(jobId, approved)`
-- `finalize(jobId)` (after 3 approvals OR 3 rejections)
-
-## What’s intentionally NOT in MVP
+## What’s next (not in MVP)
 
 - verifier staking/slashing
-- reputation
+- reputation profiles + premium verifier tiers
+- cryptographically fair randomness (VRF / commit-reveal)
 - dispute appeals
-- partial payouts / milestones
-- signature-based offchain attestations
-
-MVP goal: show the **primitive** works.
