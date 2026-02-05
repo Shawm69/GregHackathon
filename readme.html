@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quorum Escrow — README</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; max-width: 920px; margin: 32px auto; padding: 0 16px; }
+    .top { display:flex; gap:12px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+    a { color:#1a73e8; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .card { border: 1px solid #eee; border-radius: 12px; padding: 14px; }
+    pre, code { background:#f6f8fa; border-radius:8px; }
+    pre { padding:12px; overflow-x:auto; }
+    code { padding:2px 6px; }
+    h1,h2,h3 { margin-top: 22px; }
+    .muted { color:#666; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div>
+      <h1 style="margin:0;">README</h1>
+      <div class="muted">Rendered from <code>README.md</code> in this repo.</div>
+    </div>
+    <div class="card">
+      <a href="./index.html">← Back to Viewer</a>
+      &nbsp;|&nbsp;
+      <a id="mdlink" href="#" target="_blank">Open README.md</a>
+    </div>
+  </div>
+
+  <div id="content" class="card" style="margin-top:16px;">
+    <div class="muted">Loading…</div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    const mdUrl = 'https://raw.githubusercontent.com/Shawm69/GregHackathon/main/README.md';
+    document.getElementById('mdlink').href = 'https://github.com/Shawm69/GregHackathon/blob/main/README.md';
+
+    async function main(){
+      const el = document.getElementById('content');
+      try {
+        const res = await fetch(mdUrl, { cache: 'no-store' });
+        if(!res.ok) throw new Error(`Failed to fetch README.md (${res.status})`);
+        const md = await res.text();
+        el.innerHTML = marked.parse(md);
+      } catch (e) {
+        el.innerHTML = `<b>Error:</b> <code>${(e && e.message) ? e.message : String(e)}</code>`;
+      }
+    }
+    main();
+  </script>
+</body>
+</html>
