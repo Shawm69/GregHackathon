@@ -42,13 +42,14 @@
       <div class="row" style="margin-top: 12px;">
         <div style="flex: 1 1 220px;">
           <label>Lookback blocks</label>
-          <input id="lookback" value="200000" />
+          <input id="lookback" value="40000" />
         </div>
         <div style="flex: 1 1 420px;">
           <label>Verifier address (optional)</label>
           <input id="verifier" placeholder="0x…" />
         </div>
-        <div>
+        <div style="display:flex; gap:10px;">
+          <button id="connectBtn">Connect wallet</button>
           <button id="refreshBtn">Refresh</button>
         </div>
       </div>
@@ -122,6 +123,16 @@
         const provider = new ethers.providers.JsonRpcProvider(rpc);
         const c = new ethers.Contract(escrow, ABI, provider);
         return { provider, c, escrow };
+      }
+
+      async function queryFilterChunked(c, filter, fromBlock, toBlock, chunkSize = 45000) {
+        const logs = [];
+        for (let start = fromBlock; start <= toBlock; start += chunkSize) {
+          const end = Math.min(toBlock, start + chunkSize - 1);
+          const part = await c.queryFilter(filter, start, end);
+          logs.push(...part);
+        }
+        return logs;
       }
 
       async function loadJob(jobId) {
@@ -200,13 +211,13 @@
 
           const { provider, c, escrow } = await getContract();
           const latest = await provider.getBlockNumber();
-          const fromBlock = Math.max(0, latest - (Number.isFinite(lookback) ? lookback : 0));
+          let fromBlock = Math.max(0, latest - (Number.isFinite(lookback) ? lookback : 0));
 
-          // Recent activity (events)
-          const created = await c.queryFilter(c.filters.JobCreated(), fromBlock, latest);
-          const submitted = await c.queryFilter(c.filters.WorkSubmitted(), fromBlock, latest);
-          const attested = await c.queryFilter(c.filters.Attested(), fromBlock, latest);
-          const finalized = await c.queryFilter(c.filters.Finalized(), fromBlock, latest);
+          // Many public RPCs cap eth_getLogs ranges (often 50k blocks). Chunk queries to avoid hard failures.
+          const created = await queryFilterChunked(c, c.filters.JobCreated(), fromBlock, latest);
+          const submitted = await queryFilterChunked(c, c.filters.WorkSubmitted(), fromBlock, latest);
+          const attested = await queryFilterChunked(c, c.filters.Attested(), fromBlock, latest);
+          const finalized = await queryFilterChunked(c, c.filters.Finalized(), fromBlock, latest);
 
           const activity = [];
           for (const ev of created) activity.push({ type: 'JobCreated', jobId: ev.args.jobId, tx: ev.transactionHash, block: ev.blockNumber, note: `payer=${shortAddr(ev.args.payer)} worker=${shortAddr(ev.args.worker)}` });
@@ -312,10 +323,35 @@
         }
       }
 
+      async function connectWallet() {
+        const btn = document.getElementById('connectBtn');
+        try {
+          if (!window.ethereum) {
+            alert('No wallet found. Install MetaMask (or a compatible wallet) to auto-fill verifier address.');
+            return;
+          }
+          setBusy(btn, true);
+          const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+          const addr = accounts && accounts[0];
+          if (addr) {
+            document.getElementById('verifier').value = addr;
+            await loadDashboard();
+          }
+        } catch (e) {
+          console.error(e);
+          alert((e && e.message) ? e.message : String(e));
+        } finally {
+          setBusy(btn, false);
+        }
+      }
+
       document.getElementById('loadBtn').dataset.label = 'Load';
       document.getElementById('refreshBtn').dataset.label = 'Refresh';
+      document.getElementById('connectBtn').dataset.label = 'Connect wallet';
       document.getElementById('loadBtn').addEventListener('click', () => loadJob(document.getElementById('jobId').value.trim()));
       document.getElementById('refreshBtn').addEventListener('click', loadDashboard);
+      document.getElementById('connectBtn').addEventListener('click', connectWallet);
+
       // Auto-load dashboard on open
       loadDashboard();
     </script>
